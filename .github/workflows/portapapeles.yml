@@ -156,6 +156,7 @@ jobs:
           import androidx.appcompat.app.AlertDialog
           import androidx.appcompat.app.AppCompatActivity
           import com.google.android.material.button.MaterialButton
+          import org.json.JSONArray
 
           class MainActivity : AppCompatActivity() {
 
@@ -182,7 +183,7 @@ jobs:
                   }
 
                   val subtitle = TextView(this).apply {
-                      text = "Burbuja flotante transparente\nHistorial de portapapeles inteligente"
+                      text = "Burbuja de acceso al historial\nMáximo 10 elementos"
                       setTextColor(Color.parseColor("#AAAAAA"))
                       textSize = 14f
                       gravity = Gravity.CENTER
@@ -215,7 +216,7 @@ jobs:
                           }
                           val i = Intent(this@MainActivity, ClipboardService::class.java).apply { action = "START" }
                           if (Build.VERSION.SDK_INT >= 26) startForegroundService(i) else startService(i)
-                          Toast.makeText(this@MainActivity, "Burbuja transparente activa - minimizando", Toast.LENGTH_SHORT).show()
+                          Toast.makeText(this@MainActivity, "Burbuja activa - minimizando", Toast.LENGTH_SHORT).show()
                           moveTaskToBack(true)
                       }
                   }
@@ -250,7 +251,7 @@ jobs:
                   }
 
                   val hint = TextView(this).apply {
-                      text = "\n\nInstrucciones:\n1. INICIAR BURBUJA\n2. Toca la burbuja transparente para guardar lo copiado\n3. Mantén presionada la burbuja para ver el historial completo\n4. Arrastra la burbuja donde prefieras"
+                      text = "\n\nInstrucciones:\n1. INICIAR BURBUJA\n2. Toca la burbuja flotante para abrir el historial\n3. Al tocar una copia en el historial, se copia y se cierra solo\n4. Arrastra la burbuja donde prefieras"
                       setTextColor(Color.parseColor("#555555"))
                       textSize = 11f
                       gravity = Gravity.CENTER
@@ -277,19 +278,77 @@ jobs:
 
               private fun handleIntent(intent: Intent) {
                   if (intent.action == "SHOW_HISTORY") {
-                      // Pequeño retardo para asegurar que la actividad esté completamente visible
                       window.decorView.post { showHistoryDialog() }
                   }
               }
 
-              private fun showHistoryDialog() {
-                  val prefs = getSharedPreferences("clipboard_prefs", MODE_PRIVATE)
-                  val clipSet = prefs.getStringSet("history", emptySet()) ?: emptySet()
+              private fun getHistoryList(): MutableList<String> {
+                  try {
+                      val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                      val clip = cm.primaryClip
+                      if (clip != null && clip.itemCount > 0) {
+                          val text = clip.getItemAt(0).text?.toString()
+                          if (!text.isNullOrBlank()) {
+                              saveToHistoryInternal(text)
+                          }
+                      }
+                  } catch (_: Exception) {}
 
-                  if (clipSet.isEmpty()) {
+                  val prefs = getSharedPreferences("clipboard_prefs", MODE_PRIVATE)
+                  val jsonStr = prefs.getString("history_json", "[]") ?: "[]"
+                  val list = mutableListOf<String>()
+                  try {
+                      val jsonArray = JSONArray(jsonStr)
+                      for (i in 0 until jsonArray.length()) {
+                          list.add(jsonArray.getString(i))
+                      }
+                  } catch (_: Exception) {}
+                  return list
+              }
+
+              private fun saveToHistoryInternal(text: String) {
+                  val prefs = getSharedPreferences("clipboard_prefs", MODE_PRIVATE)
+                  val jsonStr = prefs.getString("history_json", "[]") ?: "[]"
+                  val list = mutableListOf<String>()
+                  try {
+                      val jsonArray = JSONArray(jsonStr)
+                      for (i in 0 until jsonArray.length()) {
+                          list.add(jsonArray.getString(i))
+                      }
+                  } catch (_: Exception) {}
+
+                  if (list.isNotEmpty() && list[0] == text) return
+
+                  list.add(0, text)
+                  while (list.size > 10) {
+                      list.removeAt(list.size - 1)
+                  }
+
+                  val newArray = JSONArray()
+                  list.forEach { newArray.put(it) }
+
+                  prefs.edit()
+                      .putString("history_json", newArray.toString())
+                      .putString("last", text)
+                      .apply()
+              }
+
+              private fun getPreview(text: String): String {
+                  val words = text.trim().split(Regex("\\s+"))
+                  return if (words.size <= 3) {
+                      text.trim()
+                  } else {
+                      "${words[0]} ${words[1]} ${words[2]}..."
+                  }
+              }
+
+              private fun showHistoryDialog() {
+                  val history = getHistoryList()
+
+                  if (history.isEmpty()) {
                       AlertDialog.Builder(this)
                           .setTitle("Historial vacío")
-                          .setMessage("Aún no has guardado ningún texto con la burbuja.")
+                          .setMessage("Aún no hay textos copiados en el sistema.")
                           .setPositiveButton("OK", null)
                           .show()
                       return
@@ -301,12 +360,21 @@ jobs:
                       setPadding(32, 16, 32, 16)
                   }
 
-                  val sortedList = clipSet.toMutableList()
-                  sortedList.reverse()
+                  // Creamos primero el diálogo para poder cerrarlo al hacer clic en un elemento
+                  val dialog = AlertDialog.Builder(this)
+                      .setTitle("Historial (${history.size}/10) - Toca para copiar")
+                      .setView(scrollView)
+                      .setPositiveButton("Cerrar", null)
+                      .setNeutralButton("Limpiar historial") { _, _ ->
+                          getSharedPreferences("clipboard_prefs", MODE_PRIVATE).edit().remove("history_json").remove("last").apply()
+                          Toast.makeText(this, "Historial limpiado", Toast.LENGTH_SHORT).show()
+                      }
+                      .create()
 
-                  sortedList.forEach { textItem ->
+                  history.forEach { fullText ->
+                      val previewText = getPreview(fullText)
                       val tv = TextView(this).apply {
-                          text = textItem
+                          text = previewText
                           setTextColor(Color.WHITE)
                           textSize = 14f
                           setPadding(24, 24, 24, 24)
@@ -320,29 +388,21 @@ jobs:
                           layoutParams = lp
                           setOnClickListener {
                               val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                              cm.setPrimaryClip(ClipData.newPlainText("clip", textItem))
-                              Toast.makeText(context, "Copiado al portapapeles", Toast.LENGTH_SHORT).show()
+                              cm.setPrimaryClip(ClipData.newPlainText("clip", fullText))
+                              Toast.makeText(context, "¡Copiado y menú cerrado!", Toast.LENGTH_SHORT).show()
+                              dialog.dismiss() // Se cierra automáticamente aquí
                           }
                       }
                       linearLayout.addView(tv)
                   }
 
                   scrollView.addView(linearLayout)
-
-                  AlertDialog.Builder(this)
-                      .setTitle("Historial (${clipSet.size}) - Toca para copiar")
-                      .setView(scrollView)
-                      .setPositiveButton("Cerrar", null)
-                      .setNeutralButton("Limpiar historial") { _, _ ->
-                          prefs.edit().remove("history").apply()
-                          Toast.makeText(this, "Historial limpiado", Toast.LENGTH_SHORT).show()
-                      }
-                      .show()
+                  dialog.show()
               }
 
               private fun refreshLast() {
                   val last = getSharedPreferences("clipboard_prefs", MODE_PRIVATE).getString("last", "") ?: ""
-                  tvLast.text = if (last.isNotEmpty()) "Último: $last" else "Sin textos guardados aún"
+                  tvLast.text = if (last.isNotEmpty()) "Último: ${getPreview(last)}" else "Sin textos guardados aún"
               }
 
               override fun onResume() {
@@ -361,7 +421,6 @@ jobs:
           import android.app.NotificationChannel
           import android.app.NotificationManager
           import android.app.Service
-          import android.content.ClipData
           import android.content.ClipboardManager
           import android.content.Context
           import android.content.Intent
@@ -376,8 +435,8 @@ jobs:
           import android.view.MotionEvent
           import android.view.View
           import android.view.WindowManager
-          import android.widget.Toast
           import androidx.core.app.NotificationCompat
+          import org.json.JSONArray
 
           class ClipboardService : Service() {
 
@@ -426,7 +485,7 @@ jobs:
                   }
                   val notif: Notification = NotificationCompat.Builder(this, channelId)
                       .setContentTitle("Clipboard AMOLED activo")
-                      .setContentText("Toca la burbuja transparente para capturar texto.")
+                      .setContentText("Toca la burbuja para abrir el historial.")
                       .setSmallIcon(android.R.drawable.ic_menu_edit)
                       .setOngoing(true)
                       .build()
@@ -436,7 +495,7 @@ jobs:
               private fun showBubble() {
                   removeBubble()
 
-                  val size = 110 // Tamaño en píxeles (discreto y cómodo)
+                  val size = 110
                   val params = WindowManager.LayoutParams(
                       size,
                       size,
@@ -451,18 +510,15 @@ jobs:
                       y = 300
                   }
 
-                  // Configuración visual: Círculo transparente con borde fino gris sutil
                   val bubbleDrawable = GradientDrawable().apply {
                       shape = GradientDrawable.OVAL
-                      setColor(Color.parseColor("#15000000")) // Fondo ultra transparente (casi invisible)
-                      setStroke(2, Color.parseColor("#888888")) // Contorno fino visible para localizarlo
+                      setColor(Color.parseColor("#15000000"))
+                      setStroke(2, Color.parseColor("#888888"))
                   }
 
                   val bubble = View(this).apply {
                       background = bubbleDrawable
                   }
-
-                  var touchDownTime = 0L
 
                   bubble.setOnTouchListener { v, event ->
                       when (event.action) {
@@ -472,7 +528,6 @@ jobs:
                               initialTouchX = event.rawX
                               initialTouchY = event.rawY
                               isDragging = false
-                              touchDownTime = System.currentTimeMillis()
                               true
                           }
                           MotionEvent.ACTION_MOVE -> {
@@ -489,15 +544,8 @@ jobs:
                               true
                           }
                           MotionEvent.ACTION_UP -> {
-                              val duration = System.currentTimeMillis() - touchDownTime
                               if (!isDragging) {
-                                  if (duration > 400) {
-                                      // Mantener presionado -> Abrir historial
-                                      openHistoryActivity()
-                                  } else {
-                                      // Toca rápido -> Capturar portapapeles actual
-                                      captureCurrentClipboard()
-                                  }
+                                  captureAndOpenHistory()
                               }
                               isDragging = false
                               true
@@ -512,36 +560,50 @@ jobs:
                   } catch (_: Exception) {}
               }
 
-              private fun captureCurrentClipboard() {
+              private fun captureAndOpenHistory() {
                   try {
                       val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                       val clip = cm.primaryClip
                       if (clip != null && clip.itemCount > 0) {
                           val text = clip.getItemAt(0).text?.toString()
                           if (!text.isNullOrBlank()) {
-                              saveAndCopy(text)
-                              vibrate()
-                              val preview = if(text.length > 20) text.substring(0, 20) + "..." else text
-                              Toast.makeText(this, "Guardado: $preview", Toast.LENGTH_SHORT).show()
-                              return
+                              saveToHistory(text)
                           }
                       }
-                      Toast.makeText(this, "No hay texto en el portapapeles", Toast.LENGTH_SHORT).show()
-                  } catch (e: Exception) {
-                      Toast.makeText(this, "Error al leer portapapeles", Toast.LENGTH_SHORT).show()
-                  }
+                  } catch (_: Exception) {}
+
+                  vibrate()
+                  openHistoryActivity()
               }
 
-              private fun saveAndCopy(text: String) {
+              private fun saveToHistory(text: String) {
                   val prefs = getSharedPreferences("clipboard_prefs", MODE_PRIVATE)
-                  prefs.edit().putString("last", text).apply()
-                  val history = prefs.getStringSet("history", mutableSetOf())?.toMutableSet() ?: mutableSetOf()
-                  history.add(text)
-                  prefs.edit().putStringSet("history", history).apply()
+                  val jsonStr = prefs.getString("history_json", "[]") ?: "[]"
+                  val list = mutableListOf<String>()
+                  try {
+                      val jsonArray = JSONArray(jsonStr)
+                      for (i in 0 until jsonArray.length()) {
+                          list.add(jsonArray.getString(i))
+                      }
+                  } catch (_: Exception) {}
+
+                  if (list.isNotEmpty() && list[0] == text) return
+
+                  list.add(0, text)
+                  while (list.size > 10) {
+                      list.removeAt(list.size - 1)
+                  }
+
+                  val newArray = JSONArray()
+                  list.forEach { newArray.put(it) }
+
+                  prefs.edit()
+                      .putString("history_json", newArray.toString())
+                      .putString("last", text)
+                      .apply()
               }
 
               private fun openHistoryActivity() {
-                  vibrate()
                   val intent = Intent(this, MainActivity::class.java).apply {
                       action = "SHOW_HISTORY"
                       addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
