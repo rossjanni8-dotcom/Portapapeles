@@ -1,0 +1,586 @@
+name: Build Clipboard AMOLED
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+
+      - name: Limpiar proyecto viejo
+        run: |
+          rm -rf app build.gradle.kts settings.gradle.kts gradle.properties
+
+      - name: Aceptar licencias de Android SDK
+        run: |
+          sudo mkdir -p $ANDROID_HOME/licenses
+          echo "24333f8a63b6825ea9c5514f83c2829b004d1fee" | sudo tee $ANDROID_HOME/licenses/android-sdk-license > /dev/null
+          echo "84831b9409646a918e30573bab4c9c91346d8abd" | sudo tee $ANDROID_HOME/licenses/android-sdk-preview-license > /dev/null
+
+      - name: Crear archivos de Gradle
+        run: |
+          mkdir -p app/src/main/java/com/clipboardamoled
+
+          cat << 'EOF' > gradle.properties
+          android.useAndroidX=true
+          org.gradle.jvmargs=-Xmx2g
+          EOF
+
+          cat << 'EOF' > build.gradle.kts
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+
+          cat << 'EOF' > settings.gradle.kts
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "ClipboardAMOLED"
+          include(":app")
+          EOF
+
+          cat << 'EOF' > app/build.gradle.kts
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.clipboardamoled"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.clipboardamoled"
+                  minSdk = 24
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              buildTypes {
+                  release { isMinifyEnabled = false }
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+
+          dependencies {
+              implementation("androidx.appcompat:appcompat:1.6.1")
+              implementation("androidx.core:core-ktx:1.12.0")
+              implementation("com.google.android.material:material:1.12.0")
+          }
+          EOF
+
+      - name: Crear manifest
+        run: |
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.VIBRATE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+              <application
+                  android:allowBackup="true"
+                  android:label="Clipboard AMOLED"
+                  android:theme="@style/Theme.MaterialComponents.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTop">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <service
+                      android:name=".ClipboardService"
+                      android:exported="false"
+                      android:foregroundServiceType="specialUse">
+                      <property
+                          android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                          android:value="clipboard_manager_overlay" />
+                  </service>
+              </application>
+          </manifest>
+          EOF
+
+      - name: Crear MainActivity
+        run: |
+          cat << 'EOF' > app/src/main/java/com/clipboardamoled/MainActivity.kt
+          package com.clipboardamoled
+
+          import android.content.ClipData
+          import android.content.ClipboardManager
+          import android.content.Context
+          import android.content.Intent
+          import android.content.res.ColorStateList
+          import android.graphics.Color
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.view.Gravity
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.TextView
+          import android.widget.Toast
+          import androidx.appcompat.app.AlertDialog
+          import androidx.appcompat.app.AppCompatActivity
+          import com.google.android.material.button.MaterialButton
+
+          class MainActivity : AppCompatActivity() {
+
+              private lateinit var tvLast: TextView
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  handleIntent(intent)
+
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setBackgroundColor(Color.BLACK)
+                      gravity = Gravity.CENTER
+                      setPadding(48, 48, 48, 48)
+                  }
+
+                  val title = TextView(this).apply {
+                      text = "CLIPBOARD\nAMOLED"
+                      setTextColor(Color.WHITE)
+                      textSize = 28f
+                      gravity = Gravity.CENTER
+                      setPadding(0, 0, 0, 40)
+                      letterSpacing = 0.1f
+                  }
+
+                  val subtitle = TextView(this).apply {
+                      text = "Burbuja flotante transparente\nHistorial de portapapeles inteligente"
+                      setTextColor(Color.parseColor("#AAAAAA"))
+                      textSize = 14f
+                      gravity = Gravity.CENTER
+                      setPadding(0, 0, 0, 60)
+                  }
+
+                  tvLast = TextView(this).apply {
+                      setTextColor(Color.parseColor("#666666"))
+                      textSize = 12f
+                      gravity = Gravity.CENTER
+                      setPadding(0, 0, 0, 40)
+                  }
+                  refreshLast()
+
+                  val btnStart = MaterialButton(this).apply {
+                      text = "INICIAR BURBUJA"
+                      textSize = 18f
+                      setTextColor(Color.WHITE)
+                      backgroundTintList = ColorStateList.valueOf(Color.parseColor("#222222"))
+                      cornerRadius = 24
+                      setPadding(80, 40, 80, 40)
+                      strokeWidth = 2
+                      strokeColor = ColorStateList.valueOf(Color.parseColor("#444444"))
+                      setOnClickListener {
+                          if (!Settings.canDrawOverlays(this@MainActivity)) {
+                              Toast.makeText(this@MainActivity, "Activa 'Mostrar sobre otras apps'", Toast.LENGTH_LONG).show()
+                              val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
+                              startActivity(intent)
+                              return@setOnClickListener
+                          }
+                          val i = Intent(this@MainActivity, ClipboardService::class.java).apply { action = "START" }
+                          if (Build.VERSION.SDK_INT >= 26) startForegroundService(i) else startService(i)
+                          Toast.makeText(this@MainActivity, "Burbuja transparente activa - minimizando", Toast.LENGTH_SHORT).show()
+                          moveTaskToBack(true)
+                      }
+                  }
+
+                  val btnHistory = MaterialButton(this).apply {
+                      text = "VER HISTORIAL"
+                      textSize = 16f
+                      setTextColor(Color.WHITE)
+                      backgroundTintList = ColorStateList.valueOf(Color.parseColor("#1a4d8c"))
+                      cornerRadius = 24
+                      setPadding(80, 32, 80, 32)
+                      setOnClickListener {
+                          showHistoryDialog()
+                      }
+                  }
+
+                  val btnCerrar = MaterialButton(this).apply {
+                      text = "CERRAR SERVICIO"
+                      textSize = 16f
+                      setTextColor(Color.WHITE)
+                      backgroundTintList = ColorStateList.valueOf(Color.parseColor("#8B0000"))
+                      cornerRadius = 24
+                      setPadding(80, 32, 80, 32)
+                      setOnClickListener {
+                          val stopIntent = Intent(this@MainActivity, ClipboardService::class.java).apply {
+                              action = "STOP"
+                          }
+                          stopService(stopIntent)
+                          Toast.makeText(this@MainActivity, "Servicio cerrado", Toast.LENGTH_SHORT).show()
+                          finish()
+                      }
+                  }
+
+                  val hint = TextView(this).apply {
+                      text = "\n\nInstrucciones:\n1. INICIAR BURBUJA\n2. Toca la burbuja transparente para guardar lo copiado\n3. Mantén presionada la burbuja para ver el historial completo\n4. Arrastra la burbuja donde prefieras"
+                      setTextColor(Color.parseColor("#555555"))
+                      textSize = 11f
+                      gravity = Gravity.CENTER
+                  }
+
+                  root.addView(title)
+                  root.addView(subtitle)
+                  root.addView(tvLast)
+                  root.addView(btnStart)
+                  root.addView(btnHistory)
+                  root.addView(btnCerrar)
+                  root.addView(hint)
+
+                  setContentView(root)
+              }
+
+              override fun onNewIntent(intent: Intent?) {
+                  super.onNewIntent(intent)
+                  setIntent(intent)
+                  if (intent != null) {
+                      handleIntent(intent)
+                  }
+              }
+
+              private fun handleIntent(intent: Intent) {
+                  if (intent.action == "SHOW_HISTORY") {
+                      // Pequeño retardo para asegurar que la actividad esté completamente visible
+                      window.decorView.post { showHistoryDialog() }
+                  }
+              }
+
+              private fun showHistoryDialog() {
+                  val prefs = getSharedPreferences("clipboard_prefs", MODE_PRIVATE)
+                  val clipSet = prefs.getStringSet("history", emptySet()) ?: emptySet()
+
+                  if (clipSet.isEmpty()) {
+                      AlertDialog.Builder(this)
+                          .setTitle("Historial vacío")
+                          .setMessage("Aún no has guardado ningún texto con la burbuja.")
+                          .setPositiveButton("OK", null)
+                          .show()
+                      return
+                  }
+
+                  val scrollView = ScrollView(this)
+                  val linearLayout = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(32, 16, 32, 16)
+                  }
+
+                  val sortedList = clipSet.toMutableList()
+                  sortedList.reverse()
+
+                  sortedList.forEach { textItem ->
+                      val tv = TextView(this).apply {
+                          text = textItem
+                          setTextColor(Color.WHITE)
+                          textSize = 14f
+                          setPadding(24, 24, 24, 24)
+                          setBackgroundColor(Color.parseColor("#1a1a1a"))
+                          val lp = LinearLayout.LayoutParams(
+                              LinearLayout.LayoutParams.MATCH_PARENT,
+                              LinearLayout.LayoutParams.WRAP_CONTENT
+                          ).apply {
+                              setMargins(0, 0, 0, 12)
+                          }
+                          layoutParams = lp
+                          setOnClickListener {
+                              val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                              cm.setPrimaryClip(ClipData.newPlainText("clip", textItem))
+                              Toast.makeText(context, "Copiado al portapapeles", Toast.LENGTH_SHORT).show()
+                          }
+                      }
+                      linearLayout.addView(tv)
+                  }
+
+                  scrollView.addView(linearLayout)
+
+                  AlertDialog.Builder(this)
+                      .setTitle("Historial (${clipSet.size}) - Toca para copiar")
+                      .setView(scrollView)
+                      .setPositiveButton("Cerrar", null)
+                      .setNeutralButton("Limpiar historial") { _, _ ->
+                          prefs.edit().remove("history").apply()
+                          Toast.makeText(this, "Historial limpiado", Toast.LENGTH_SHORT).show()
+                      }
+                      .show()
+              }
+
+              private fun refreshLast() {
+                  val last = getSharedPreferences("clipboard_prefs", MODE_PRIVATE).getString("last", "") ?: ""
+                  tvLast.text = if (last.isNotEmpty()) "Último: $last" else "Sin textos guardados aún"
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  refreshLast()
+              }
+          }
+          EOF
+
+      - name: Crear ClipboardService
+        run: |
+          cat << 'EOF' > app/src/main/java/com/clipboardamoled/ClipboardService.kt
+          package com.clipboardamoled
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
+          import android.content.ClipData
+          import android.content.ClipboardManager
+          import android.content.Context
+          import android.content.Intent
+          import android.graphics.Color
+          import android.graphics.PixelFormat
+          import android.graphics.drawable.GradientDrawable
+          import android.os.Build
+          import android.os.IBinder
+          import android.os.VibrationEffect
+          import android.os.Vibrator
+          import android.view.Gravity
+          import android.view.MotionEvent
+          import android.view.View
+          import android.view.WindowManager
+          import android.widget.Toast
+          import androidx.core.app.NotificationCompat
+
+          class ClipboardService : Service() {
+
+              private var wm: WindowManager? = null
+              private var floatingBubble: View? = null
+
+              private var initialX = 0
+              private var initialY = 0
+              private var initialTouchX = 0f
+              private var initialTouchY = 0f
+              private var isDragging = false
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              override fun onCreate() {
+                  super.onCreate()
+                  wm = getSystemService(WINDOW_SERVICE) as WindowManager
+                  startForegroundNotification()
+              }
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  when (intent?.action) {
+                      "STOP" -> {
+                          removeBubble()
+                          stopForeground(STOP_FOREGROUND_REMOVE)
+                          stopSelf()
+                          return START_NOT_STICKY
+                      }
+                      else -> {
+                          showBubble()
+                          return START_STICKY
+                      }
+                  }
+              }
+
+              private fun overlayType(): Int =
+                  if (Build.VERSION.SDK_INT >= 26) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                  else WindowManager.LayoutParams.TYPE_PHONE
+
+              private fun startForegroundNotification() {
+                  val channelId = "clipboard_channel"
+                  if (Build.VERSION.SDK_INT >= 26) {
+                      val channel = NotificationChannel(channelId, "Clipboard AMOLED", NotificationManager.IMPORTANCE_LOW)
+                      channel.setShowBadge(false)
+                      (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(channel)
+                  }
+                  val notif: Notification = NotificationCompat.Builder(this, channelId)
+                      .setContentTitle("Clipboard AMOLED activo")
+                      .setContentText("Toca la burbuja transparente para capturar texto.")
+                      .setSmallIcon(android.R.drawable.ic_menu_edit)
+                      .setOngoing(true)
+                      .build()
+                  startForeground(1, notif)
+              }
+
+              private fun showBubble() {
+                  removeBubble()
+
+                  val size = 110 // Tamaño en píxeles (discreto y cómodo)
+                  val params = WindowManager.LayoutParams(
+                      size,
+                      size,
+                      overlayType(),
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                          WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                      PixelFormat.TRANSLUCENT
+                  ).apply {
+                      gravity = Gravity.TOP or Gravity.START
+                      x = 50
+                      y = 300
+                  }
+
+                  // Configuración visual: Círculo transparente con borde fino gris sutil
+                  val bubbleDrawable = GradientDrawable().apply {
+                      shape = GradientDrawable.OVAL
+                      setColor(Color.parseColor("#15000000")) // Fondo ultra transparente (casi invisible)
+                      setStroke(2, Color.parseColor("#888888")) // Contorno fino visible para localizarlo
+                  }
+
+                  val bubble = View(this).apply {
+                      background = bubbleDrawable
+                  }
+
+                  var touchDownTime = 0L
+
+                  bubble.setOnTouchListener { v, event ->
+                      when (event.action) {
+                          MotionEvent.ACTION_DOWN -> {
+                              initialX = params.x
+                              initialY = params.y
+                              initialTouchX = event.rawX
+                              initialTouchY = event.rawY
+                              isDragging = false
+                              touchDownTime = System.currentTimeMillis()
+                              true
+                          }
+                          MotionEvent.ACTION_MOVE -> {
+                              val dx = (event.rawX - initialTouchX).toInt()
+                              val dy = (event.rawY - initialTouchY).toInt()
+                              if (kotlin.math.abs(dx) > 10 || kotlin.math.abs(dy) > 10) {
+                                  isDragging = true
+                                  params.x = initialX + dx
+                                  params.y = initialY + dy
+                                  try {
+                                      wm?.updateViewLayout(v, params)
+                                  } catch (_: Exception) {}
+                              }
+                              true
+                          }
+                          MotionEvent.ACTION_UP -> {
+                              val duration = System.currentTimeMillis() - touchDownTime
+                              if (!isDragging) {
+                                  if (duration > 400) {
+                                      // Mantener presionado -> Abrir historial
+                                      openHistoryActivity()
+                                  } else {
+                                      // Toca rápido -> Capturar portapapeles actual
+                                      captureCurrentClipboard()
+                                  }
+                              }
+                              isDragging = false
+                              true
+                          }
+                          else -> false
+                      }
+                  }
+
+                  try {
+                      wm?.addView(bubble, params)
+                      floatingBubble = bubble
+                  } catch (_: Exception) {}
+              }
+
+              private fun captureCurrentClipboard() {
+                  try {
+                      val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                      val clip = cm.primaryClip
+                      if (clip != null && clip.itemCount > 0) {
+                          val text = clip.getItemAt(0).text?.toString()
+                          if (!text.isNullOrBlank()) {
+                              saveAndCopy(text)
+                              vibrate()
+                              val preview = if(text.length > 20) text.substring(0, 20) + "..." else text
+                              Toast.makeText(this, "Guardado: $preview", Toast.LENGTH_SHORT).show()
+                              return
+                          }
+                      }
+                      Toast.makeText(this, "No hay texto en el portapapeles", Toast.LENGTH_SHORT).show()
+                  } catch (e: Exception) {
+                      Toast.makeText(this, "Error al leer portapapeles", Toast.LENGTH_SHORT).show()
+                  }
+              }
+
+              private fun saveAndCopy(text: String) {
+                  val prefs = getSharedPreferences("clipboard_prefs", MODE_PRIVATE)
+                  prefs.edit().putString("last", text).apply()
+                  val history = prefs.getStringSet("history", mutableSetOf())?.toMutableSet() ?: mutableSetOf()
+                  history.add(text)
+                  prefs.edit().putStringSet("history", history).apply()
+              }
+
+              private fun openHistoryActivity() {
+                  vibrate()
+                  val intent = Intent(this, MainActivity::class.java).apply {
+                      action = "SHOW_HISTORY"
+                      addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                  }
+                  startActivity(intent)
+              }
+
+              private fun vibrate() {
+                  try {
+                      val v = getSystemService(VIBRATOR_SERVICE) as Vibrator
+                      if (Build.VERSION.SDK_INT >= 26) {
+                          v.vibrate(VibrationEffect.createOneShot(40, VibrationEffect.DEFAULT_AMPLITUDE))
+                      } else {
+                          @Suppress("DEPRECATION")
+                          v.vibrate(40)
+                      }
+                  } catch (_: Exception) {}
+              }
+
+              private fun removeBubble() {
+                  try {
+                      floatingBubble?.let { wm?.removeView(it) }
+                  } catch (_: Exception) {}
+                  floatingBubble = null
+              }
+
+              override fun onDestroy() {
+                  removeBubble()
+                  super.onDestroy()
+              }
+          }
+          EOF
+
+      - name: Compilar
+        run: |
+          gradle clean assembleDebug --no-daemon --stacktrace
+
+      - name: Subir APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Clipboard-AMOLED-${{ github.sha }}
+          path: app/build/outputs/apk/debug/app-debug.apk
